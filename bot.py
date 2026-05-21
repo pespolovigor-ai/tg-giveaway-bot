@@ -13,11 +13,10 @@ import time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, Filters, CallbackContext
 
-# Очищаем токен от лишних пробелов и переводов строк
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
 ADMIN_IDS = [5207853162, 5406117718]
-CHANNEL_ID = -1002376241083   # числовой ID канала
+CHANNEL_ID = -1002376241083
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set in environment variables")
@@ -31,9 +30,12 @@ logger = logging.getLogger(__name__)
 
 class Database:
     def __init__(self, db_name=None):
-        # Если переменная окружения DB_PATH задана, используем её, иначе giveaway.db
         if db_name is None:
             db_name = os.getenv("DB_PATH", "giveaway.db")
+        # Создаём директорию для файла БД, если её нет
+        db_dir = os.path.dirname(db_name)
+        if db_dir and not os.path.exists(db_dir):
+            os.makedirs(db_dir, exist_ok=True)
         self.lock = threading.Lock()
         self.conn = sqlite3.connect(db_name, check_same_thread=False)
         self.cursor = self.conn.cursor()
@@ -162,7 +164,8 @@ class Database:
                     """, (user_id, username, first_name, last_name, current_time, current_time))
                 self.conn.commit()
             return True
-        except Exception:
+        except Exception as e:
+            print(f"add_user error: {e}")
             return False
 
     def verify_user(self, user_id, method="captcha", ip_hash=None):
@@ -185,7 +188,8 @@ class Database:
                 """, (user_id, method, current_time, ip_hash))
                 self.conn.commit()
             return True
-        except Exception:
+        except Exception as e:
+            print(f"verify_user error: {e}")
             self.conn.rollback()
             return False
 
@@ -197,7 +201,8 @@ class Database:
                 fetchone=True
             )
             return bool(result and result[0] == 1)
-        except Exception:
+        except Exception as e:
+            print(f"is_verified error: {e}")
             return False
 
     def record_verification_attempt(self, user_id, success=False, method="captcha", ip_hash=None):
@@ -663,7 +668,6 @@ def start(update, context):
 
 
 def verify(update, context):
-    # Определяем объект сообщения в зависимости от типа вызова
     if update.callback_query:
         message = update.callback_query.message
         user_id = update.effective_user.id
@@ -1289,15 +1293,11 @@ def button_handler(update, context):
         giveaway_id = int(data.split("_")[1])
         user_id = update.effective_user.id
 
-        # Проверка бана
         if db.is_banned(user_id):
             query.answer("❌ Вы забанены", show_alert=True)
             return
 
-        # Проверка верификации
         is_verified = db.is_verified(user_id)
-        print(f"DEBUG join: user {user_id} is_verified={is_verified}")
-
         if not is_verified:
             query.answer("🔐 Требуется верификация", show_alert=True)
             context.bot.send_message(
@@ -1319,17 +1319,14 @@ def button_handler(update, context):
             query.answer("📢 Подпишитесь на канал, чтобы участвовать", show_alert=True)
             return
 
-        # Участие
         success = db.add_participant(giveaway_id, user_id, context.user_data.get("referrer"))
         if success:
             query.answer("✅ Вы успешно участвуете в розыгрыше!", show_alert=True)
             context.bot.send_message(
                 chat_id=user_id,
-                text=f"🎉 Вы участвуете в розыгрыше «{giveaway_info[1]}»!\n"
-                     "Удачи!"
+                text=f"🎉 Вы участвуете в розыгрыше «{giveaway_info[1]}»!\nУдачи!"
             )
         else:
-            # Проверим, может уже участвует
             if user_id in db.get_participants(giveaway_id):
                 query.answer("ℹ️ Вы уже участвуете в этом розыгрыше", show_alert=True)
             else:
