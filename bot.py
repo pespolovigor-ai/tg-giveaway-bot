@@ -17,7 +17,7 @@ from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageH
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
 ADMIN_IDS = [5207853162, 5406117718]
-CHANNEL_ID = "-1002376241083"
+CHANNEL_ID = -1002376241083   # числовой ID канала
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set in environment variables")
@@ -30,7 +30,10 @@ logger = logging.getLogger(__name__)
 
 
 class Database:
-    def __init__(self, db_name="giveaway.db"):
+    def __init__(self, db_name=None):
+        # Если переменная окружения DB_PATH задана, используем её, иначе giveaway.db
+        if db_name is None:
+            db_name = os.getenv("DB_PATH", "giveaway.db")
         self.lock = threading.Lock()
         self.conn = sqlite3.connect(db_name, check_same_thread=False)
         self.cursor = self.conn.cursor()
@@ -903,7 +906,7 @@ def new_giveaway(update, context):
 
         description = " ".join(description_parts) if description_parts else "Розыгрыш"
 
-        giveaway_id = db.create_giveaway(name, description, winners, hours, CHANNEL_ID, require_sub)
+        giveaway_id = db.create_giveaway(name, description, winners, hours, str(CHANNEL_ID), require_sub)
         if not giveaway_id:
             update.message.reply_text("Ошибка создания")
             return
@@ -1254,7 +1257,6 @@ def button_handler(update, context):
     data = query.data
 
     if data == "cmd_start":
-        # Вызываем start (через редактирование сообщения)
         user = update.effective_user
         keyboard = [
             [InlineKeyboardButton("Пройти проверку", callback_data="cmd_verify")],
@@ -1293,11 +1295,15 @@ def button_handler(update, context):
             return
 
         # Проверка верификации
-        if not db.is_verified(user_id):
+        is_verified = db.is_verified(user_id)
+        print(f"DEBUG join: user {user_id} is_verified={is_verified}")
+
+        if not is_verified:
             query.answer("🔐 Требуется верификация", show_alert=True)
             context.bot.send_message(
                 chat_id=user_id,
-                text="Для участия в розыгрышах нужно пройти проверку.\nИспользуйте команду /verify в личном чате со мной."
+                text="⚠️ Для участия в розыгрышах нужно сначала пройти проверку.\n"
+                     "Напишите /verify в личном чате со мной или нажмите кнопку «Пройти проверку» в главном меню."
             )
             return
 
@@ -1314,10 +1320,20 @@ def button_handler(update, context):
             return
 
         # Участие
-        if db.add_participant(giveaway_id, user_id, context.user_data.get("referrer")):
-            query.answer("✅ Вы успешно участвуете!", show_alert=True)
+        success = db.add_participant(giveaway_id, user_id, context.user_data.get("referrer"))
+        if success:
+            query.answer("✅ Вы успешно участвуете в розыгрыше!", show_alert=True)
+            context.bot.send_message(
+                chat_id=user_id,
+                text=f"🎉 Вы участвуете в розыгрыше «{giveaway_info[1]}»!\n"
+                     "Удачи!"
+            )
         else:
-            query.answer("ℹ️ Вы уже участвуете в этом розыгрыше", show_alert=True)
+            # Проверим, может уже участвует
+            if user_id in db.get_participants(giveaway_id):
+                query.answer("ℹ️ Вы уже участвуете в этом розыгрыше", show_alert=True)
+            else:
+                query.answer("❌ Ошибка при добавлении. Попробуйте позже.", show_alert=True)
 
 
 def error_handler(update, context):
