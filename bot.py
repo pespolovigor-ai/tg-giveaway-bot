@@ -14,6 +14,14 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, CallbackContext, Filters
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+# ========== ОТЛАДКА ==========
+print(f"DEBUG: BOT_TOKEN from env = '{BOT_TOKEN}'")
+print(f"DEBUG: token length = {len(BOT_TOKEN) if BOT_TOKEN else 0}")
+if BOT_TOKEN:
+    print(f"DEBUG: first 5 chars = '{BOT_TOKEN[:5]}'")
+# =============================
+
 ADMIN_IDS = [5207853162, 5406117718]
 CHANNEL_ID = "@sportgagarinmolodezh"
 
@@ -538,7 +546,6 @@ class Database:
         except Exception:
             return []
 
-    # ========== НОВЫЙ МЕТОД (исправляет ошибку /verify_info) ==========
     def get_verification_info(self, user_id):
         try:
             result = self._execute(
