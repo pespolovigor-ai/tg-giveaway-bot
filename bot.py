@@ -13,11 +13,11 @@ import time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, Filters, CallbackContext
 
-# Очищаем токен от пробелов и переводов строк
+# Очищаем токен от лишних пробелов и переводов строк
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
 ADMIN_IDS = [5207853162, 5406117718]
-CHANNEL_ID = "-1002376241083"
+CHANNEL_ID = "@sportgagarinmolodezh"
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set in environment variables")
@@ -660,11 +660,10 @@ def start(update, context):
 
 
 def verify(update, context):
-    # Определяем объект сообщения и ID пользователя в зависимости от типа вызова
+    # Определяем объект сообщения в зависимости от типа вызова
     if update.callback_query:
         message = update.callback_query.message
         user_id = update.effective_user.id
-        # Обязательно отвечаем на callback, чтобы Telegram не крутил кнопку
         update.callback_query.answer()
     else:
         message = update.message
@@ -859,7 +858,7 @@ def admin_panel(update, context, message=None):
     user_id = update.effective_user.id if update.effective_user else message.from_user.id
     if not is_admin(user_id):
         if message:
-            message.edit_text("Нет прав")
+            message.edit_text("Нет прав", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="cmd_start")]]))
         else:
             update.message.reply_text("Нет прав")
         return
@@ -1255,10 +1254,8 @@ def button_handler(update, context):
     data = query.data
 
     if data == "cmd_start":
-        # Вызываем start, но нужно передать сообщение, чтобы не отправлять новое
-        # Просто запустим новую сессию, но лучше переиспользовать message
+        # Вызываем start (через редактирование сообщения)
         user = update.effective_user
-        # Чтобы не дублировать код, отредактируем текущее сообщение
         keyboard = [
             [InlineKeyboardButton("Пройти проверку", callback_data="cmd_verify")],
             [InlineKeyboardButton("Мои рефералы", callback_data="cmd_my_referrals")],
@@ -1271,7 +1268,6 @@ def button_handler(update, context):
         text = f"Привет, {user.first_name}!\n\nБот для розыгрышей\n\nВыберите действие:"
         query.edit_message_text(text, reply_markup=markup)
     elif data == "cmd_verify":
-        # Вызываем verify с обработкой callback
         verify(update, context)
     elif data == "cmd_my_referrals":
         my_referrals(update, context, message=query.message)
@@ -1291,29 +1287,37 @@ def button_handler(update, context):
         giveaway_id = int(data.split("_")[1])
         user_id = update.effective_user.id
 
+        # Проверка бана
         if db.is_banned(user_id):
-            query.edit_message_text("Вы забанены")
+            query.answer("❌ Вы забанены", show_alert=True)
             return
+
+        # Проверка верификации
         if not db.is_verified(user_id):
-            query.edit_message_text("Сначала пройдите проверку: /verify")
+            query.answer("🔐 Требуется верификация", show_alert=True)
+            context.bot.send_message(
+                chat_id=user_id,
+                text="Для участия в розыгрышах нужно пройти проверку.\nИспользуйте команду /verify в личном чате со мной."
+            )
             return
 
         giveaway_info = db.get_giveaway_info(giveaway_id)
         if not giveaway_info or giveaway_info[6] != 1:
-            query.edit_message_text("Розыгрыш не найден или завершён")
+            query.answer("❌ Розыгрыш не найден или завершён", show_alert=True)
             return
 
         require_sub = giveaway_info[10]
         channel_id = giveaway_info[8]
 
         if require_sub == 1 and not check_subscription(context.bot, user_id, channel_id):
-            query.edit_message_text("Сначала подпишитесь на канал")
+            query.answer("📢 Подпишитесь на канал, чтобы участвовать", show_alert=True)
             return
 
+        # Участие
         if db.add_participant(giveaway_id, user_id, context.user_data.get("referrer")):
-            query.edit_message_text("Вы успешно участвуете!")
+            query.answer("✅ Вы успешно участвуете!", show_alert=True)
         else:
-            query.edit_message_text("Вы уже участвуете")
+            query.answer("ℹ️ Вы уже участвуете в этом розыгрыше", show_alert=True)
 
 
 def error_handler(update, context):
