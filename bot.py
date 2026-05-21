@@ -11,16 +11,10 @@ import threading
 import time
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, CallbackContext, Filters
+from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, Filters, CallbackContext
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-
-# ========== ОТЛАДКА ==========
-print(f"DEBUG: BOT_TOKEN from env = '{BOT_TOKEN}'")
-print(f"DEBUG: token length = {len(BOT_TOKEN) if BOT_TOKEN else 0}")
-if BOT_TOKEN:
-    print(f"DEBUG: first 5 chars = '{BOT_TOKEN[:5]}'")
-# =============================
+# Очищаем токен от пробелов и переводов строк
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
 ADMIN_IDS = [5207853162, 5406117718]
 CHANNEL_ID = "@sportgagarinmolodezh"
@@ -666,18 +660,27 @@ def start(update, context):
 
 
 def verify(update, context):
-    if update.message.chat.type != "private":
-        update.message.reply_text("Только в личных сообщениях!")
+    # Определяем объект сообщения и ID пользователя в зависимости от типа вызова
+    if update.callback_query:
+        message = update.callback_query.message
+        user_id = update.effective_user.id
+        # Обязательно отвечаем на callback, чтобы Telegram не крутил кнопку
+        update.callback_query.answer()
+    else:
+        message = update.message
+        user_id = update.effective_user.id
+
+    if message.chat.type != "private":
+        message.reply_text("Только в личных сообщениях!")
         return
 
-    user_id = update.effective_user.id
     if db.is_banned(user_id):
-        update.message.reply_text("Вы забанены")
+        message.reply_text("Вы забанены")
         return
 
     if db.is_verified(user_id):
         markup = InlineKeyboardMarkup([[InlineKeyboardButton("Главное меню", callback_data="cmd_start")]])
-        update.message.reply_text("Вы уже верифицированы!", reply_markup=markup)
+        message.reply_text("Вы уже верифицированы!", reply_markup=markup)
         return
 
     question, answer = generate_captcha()
@@ -689,7 +692,7 @@ def verify(update, context):
         "time": datetime.now(),
         "ip_hash": ip_hash
     }
-    update.message.reply_text(
+    message.reply_text(
         f"Пройдите проверку\n\nРешите: {question} = ?\n\nОтправьте ответ числом."
     )
 
@@ -1252,8 +1255,23 @@ def button_handler(update, context):
     data = query.data
 
     if data == "cmd_start":
-        start(update, context)
+        # Вызываем start, но нужно передать сообщение, чтобы не отправлять новое
+        # Просто запустим новую сессию, но лучше переиспользовать message
+        user = update.effective_user
+        # Чтобы не дублировать код, отредактируем текущее сообщение
+        keyboard = [
+            [InlineKeyboardButton("Пройти проверку", callback_data="cmd_verify")],
+            [InlineKeyboardButton("Мои рефералы", callback_data="cmd_my_referrals")],
+            [InlineKeyboardButton("Топ рефереров", callback_data="cmd_top")],
+            [InlineKeyboardButton("Помощь", callback_data="cmd_help")]
+        ]
+        if is_admin(user.id):
+            keyboard.append([InlineKeyboardButton("Админ-панель", callback_data="cmd_admin")])
+        markup = InlineKeyboardMarkup(keyboard)
+        text = f"Привет, {user.first_name}!\n\nБот для розыгрышей\n\nВыберите действие:"
+        query.edit_message_text(text, reply_markup=markup)
     elif data == "cmd_verify":
+        # Вызываем verify с обработкой callback
         verify(update, context)
     elif data == "cmd_my_referrals":
         my_referrals(update, context, message=query.message)
@@ -1264,38 +1282,38 @@ def button_handler(update, context):
     elif data == "cmd_admin":
         admin_panel(update, context, message=query.message)
     elif data == "admin_new":
-        query.message.edit_text("Создание розыгрыша через команду:\n/new <название> <победителей> [часы] [описание]\nДобавьте 'sub' в конце для проверки подписки")
+        query.edit_message_text("Создание розыгрыша через команду:\n/new <название> <победителей> [часы] [описание]\nДобавьте 'sub' в конце для проверки подписки")
     elif data == "admin_list":
         list_giveaways_cmd(update, context, message=query.message)
     elif data == "admin_stats":
-        query.message.edit_text("Используйте команду: /stats <id>")
+        query.edit_message_text("Используйте команду: /stats <id>")
     elif data.startswith("join_"):
         giveaway_id = int(data.split("_")[1])
         user_id = update.effective_user.id
 
         if db.is_banned(user_id):
-            query.message.reply_text("Вы забанены")
+            query.edit_message_text("Вы забанены")
             return
         if not db.is_verified(user_id):
-            query.message.reply_text("Сначала пройдите проверку: /verify")
+            query.edit_message_text("Сначала пройдите проверку: /verify")
             return
 
         giveaway_info = db.get_giveaway_info(giveaway_id)
         if not giveaway_info or giveaway_info[6] != 1:
-            query.message.reply_text("Розыгрыш не найден или завершён")
+            query.edit_message_text("Розыгрыш не найден или завершён")
             return
 
         require_sub = giveaway_info[10]
         channel_id = giveaway_info[8]
 
         if require_sub == 1 and not check_subscription(context.bot, user_id, channel_id):
-            query.message.reply_text("Сначала подпишитесь на канал")
+            query.edit_message_text("Сначала подпишитесь на канал")
             return
 
         if db.add_participant(giveaway_id, user_id, context.user_data.get("referrer")):
-            query.message.reply_text("Вы успешно участвуете!")
+            query.edit_message_text("Вы успешно участвуете!")
         else:
-            query.message.reply_text("Вы уже участвуете")
+            query.edit_message_text("Вы уже участвуете")
 
 
 def error_handler(update, context):
