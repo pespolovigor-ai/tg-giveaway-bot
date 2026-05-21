@@ -21,131 +21,165 @@ CHANNEL_ID = -1002376241083   # числовой ID канала
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set in environment variables")
 
-# ========== НАСТРОЙКА БАЗЫ ДАННЫХ С ПОДДЕРЖКОЙ ТОМА ==========
-# Если переменная DB_PATH задана (например, /app/data/giveaway.db) – используем её.
-# Иначе – файл giveaway.db в текущей папке.
+# ========== НАСТРОЙКА БАЗЫ ДАННЫХ (для розыгрышей, участников, рефералов) ==========
 DB_PATH = os.getenv("DB_PATH", "giveaway.db")
-# Создаём директорию, если её нет (для томов Railway)
 db_dir = os.path.dirname(DB_PATH)
 if db_dir and not os.path.exists(db_dir):
     os.makedirs(db_dir, exist_ok=True)
-    print(f"Создана директория для БД: {db_dir}")
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
-logger.info(f"База данных будет храниться по пути: {DB_PATH}")
+logger.info(f"База данных: {DB_PATH}")
 
-# ========== КЛАСС DATABASE (полностью сохранён, изменён только __init__ для пути) ==========
+# ========== ПРОСТОЕ ХРАНИЛИЩЕ ДЛЯ ВЕРИФИКАЦИИ (текстовый файл) ==========
+# Файл будет лежать в той же папке, что и БД (на томе)
+VERIFIED_FILE = os.path.join(os.path.dirname(DB_PATH), "verified_users.txt")
+logger.info(f"Файл верификации: {VERIFIED_FILE}")
+
+def load_verified():
+    """Загружает множество верифицированных user_id из файла"""
+    verified = set()
+    if os.path.exists(VERIFIED_FILE):
+        with open(VERIFIED_FILE, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line.isdigit():
+                    verified.add(int(line))
+    logger.info(f"Загружено {len(verified)} верифицированных пользователей")
+    return verified
+
+def save_verified(verified_set):
+    """Сохраняет множество верифицированных user_id в файл"""
+    with open(VERIFIED_FILE, "w") as f:
+        for uid in verified_set:
+            f.write(f"{uid}\n")
+
+verified_users = load_verified()  # глобальное множество
+
+def set_verified(user_id):
+    """Отмечает пользователя как верифицированного"""
+    if user_id not in verified_users:
+        verified_users.add(user_id)
+        save_verified(verified_users)
+        logger.info(f"Пользователь {user_id} добавлен в верифицированные")
+        return True
+    return False
+
+def is_verified(user_id):
+    """Проверяет, верифицирован ли пользователь"""
+    result = user_id in verified_users
+    logger.info(f"is_verified({user_id}) -> {result}")
+    return result
+
+# ========== SQLite (для всего остального) ==========
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+cur = conn.cursor()
+
+# Создаём все необходимые таблицы (как в вашем исходном коде)
+cur.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY,
+        username TEXT,
+        first_name TEXT,
+        last_name TEXT,
+        joined_date TEXT NOT NULL,
+        is_verified INTEGER DEFAULT 0,  -- дублируем, но для совместимости
+        verification_date TEXT,
+        verification_method TEXT,
+        is_banned INTEGER DEFAULT 0,
+        ban_reason TEXT,
+        banned_date TEXT,
+        ip_hash TEXT,
+        last_activity TEXT,
+        verification_attempts INTEGER DEFAULT 0
+    )
+""")
+cur.execute("""
+    CREATE TABLE IF NOT EXISTS verification_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        verification_type TEXT NOT NULL,
+        success INTEGER NOT NULL,
+        attempt_date TEXT NOT NULL,
+        ip_hash TEXT
+    )
+""")
+cur.execute("""
+    CREATE TABLE IF NOT EXISTS ban_list (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        admin_id INTEGER,
+        reason TEXT,
+        ban_date TEXT NOT NULL,
+        unban_date TEXT
+    )
+""")
+cur.execute("""
+    CREATE TABLE IF NOT EXISTS ip_addresses (
+        ip_hash TEXT PRIMARY KEY,
+        user_count INTEGER DEFAULT 1,
+        first_seen TEXT NOT NULL,
+        last_seen TEXT NOT NULL
+    )
+""")
+cur.execute("""
+    CREATE TABLE IF NOT EXISTS giveaways (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        description TEXT,
+        winner_count INTEGER DEFAULT 1,
+        start_date TEXT NOT NULL,
+        end_date TEXT NOT NULL,
+        is_active INTEGER DEFAULT 1,
+        message_id INTEGER,
+        channel_id TEXT,
+        auto_finish INTEGER DEFAULT 1,
+        require_subscription INTEGER DEFAULT 0
+    )
+""")
+cur.execute("""
+    CREATE TABLE IF NOT EXISTS participants (
+        giveaway_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        join_date TEXT NOT NULL,
+        is_valid INTEGER DEFAULT 1,
+        referred_by INTEGER,
+        bonus_entries INTEGER DEFAULT 0,
+        PRIMARY KEY (giveaway_id, user_id)
+    )
+""")
+cur.execute("""
+    CREATE TABLE IF NOT EXISTS referrals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        referrer_id INTEGER NOT NULL,
+        referred_id INTEGER NOT NULL,
+        giveaway_id INTEGER NOT NULL,
+        referral_date TEXT NOT NULL,
+        UNIQUE(referrer_id, referred_id, giveaway_id)
+    )
+""")
+conn.commit()
+
+# Класс Database (минимально изменён, чтобы не конфликтовать)
 class Database:
-    def __init__(self, db_name=None):
-        if db_name is None:
-            db_name = DB_PATH   # используем путь из переменной окружения
+    def __init__(self):
         self.lock = threading.Lock()
-        self.conn = sqlite3.connect(db_name, check_same_thread=False)
-        self.cursor = self.conn.cursor()
-        self.create_tables()
+        # Используем глобальные conn и cur
 
     def _execute(self, query, params=(), fetchone=False, fetchall=False, commit=False):
         with self.lock:
-            self.cursor.execute(query, params)
+            cur.execute(query, params)
             result = None
             if fetchone:
-                result = self.cursor.fetchone()
+                result = cur.fetchone()
             elif fetchall:
-                result = self.cursor.fetchall()
+                result = cur.fetchall()
             if commit:
-                self.conn.commit()
+                conn.commit()
             return result
-
-    def create_tables(self):
-        with self.lock:
-            self.cursor.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id INTEGER PRIMARY KEY,
-                    username TEXT,
-                    first_name TEXT,
-                    last_name TEXT,
-                    joined_date TEXT NOT NULL,
-                    is_verified INTEGER DEFAULT 0,
-                    verification_date TEXT,
-                    verification_method TEXT,
-                    is_banned INTEGER DEFAULT 0,
-                    ban_reason TEXT,
-                    banned_date TEXT,
-                    ip_hash TEXT,
-                    last_activity TEXT,
-                    verification_attempts INTEGER DEFAULT 0
-                )
-            """)
-            self.cursor.execute("""
-                CREATE TABLE IF NOT EXISTS verification_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER NOT NULL,
-                    verification_type TEXT NOT NULL,
-                    success INTEGER NOT NULL,
-                    attempt_date TEXT NOT NULL,
-                    ip_hash TEXT
-                )
-            """)
-            self.cursor.execute("""
-                CREATE TABLE IF NOT EXISTS ban_list (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER NOT NULL,
-                    admin_id INTEGER,
-                    reason TEXT,
-                    ban_date TEXT NOT NULL,
-                    unban_date TEXT
-                )
-            """)
-            self.cursor.execute("""
-                CREATE TABLE IF NOT EXISTS ip_addresses (
-                    ip_hash TEXT PRIMARY KEY,
-                    user_count INTEGER DEFAULT 1,
-                    first_seen TEXT NOT NULL,
-                    last_seen TEXT NOT NULL
-                )
-            """)
-            self.cursor.execute("""
-                CREATE TABLE IF NOT EXISTS giveaways (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL,
-                    description TEXT,
-                    winner_count INTEGER DEFAULT 1,
-                    start_date TEXT NOT NULL,
-                    end_date TEXT NOT NULL,
-                    is_active INTEGER DEFAULT 1,
-                    message_id INTEGER,
-                    channel_id TEXT,
-                    auto_finish INTEGER DEFAULT 1,
-                    require_subscription INTEGER DEFAULT 0
-                )
-            """)
-            self.cursor.execute("""
-                CREATE TABLE IF NOT EXISTS participants (
-                    giveaway_id INTEGER NOT NULL,
-                    user_id INTEGER NOT NULL,
-                    join_date TEXT NOT NULL,
-                    is_valid INTEGER DEFAULT 1,
-                    referred_by INTEGER,
-                    bonus_entries INTEGER DEFAULT 0,
-                    PRIMARY KEY (giveaway_id, user_id)
-                )
-            """)
-            self.cursor.execute("""
-                CREATE TABLE IF NOT EXISTS referrals (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    referrer_id INTEGER NOT NULL,
-                    referred_id INTEGER NOT NULL,
-                    giveaway_id INTEGER NOT NULL,
-                    referral_date TEXT NOT NULL,
-                    UNIQUE(referrer_id, referred_id, giveaway_id)
-                )
-            """)
-            self.conn.commit()
-            logger.info("Таблицы созданы/проверены")
 
     def add_user(self, user_id, username, first_name, last_name=""):
         try:
@@ -157,31 +191,31 @@ class Database:
             )
             with self.lock:
                 if exists:
-                    self.cursor.execute("""
+                    cur.execute("""
                         UPDATE users
                         SET username = ?, first_name = ?, last_name = ?, last_activity = ?
                         WHERE user_id = ?
                     """, (username, first_name, last_name, current_time, user_id))
                 else:
-                    self.cursor.execute("""
+                    cur.execute("""
                         INSERT INTO users (
                             user_id, username, first_name, last_name,
                             joined_date, last_activity, is_verified
                         )
                         VALUES (?, ?, ?, ?, ?, ?, 0)
                     """, (user_id, username, first_name, last_name, current_time, current_time))
-                self.conn.commit()
-            logger.info(f"Пользователь {user_id} добавлен/обновлён")
+                conn.commit()
             return True
         except Exception as e:
-            logger.error(f"add_user ошибка: {e}")
+            logger.error(f"add_user error: {e}")
             return False
 
     def verify_user(self, user_id, method="captcha", ip_hash=None):
+        # Здесь тоже обновим и текстовый файл, и SQLite для совместимости
         try:
             current_time = datetime.now().isoformat()
             with self.lock:
-                self.cursor.execute("""
+                cur.execute("""
                     UPDATE users
                     SET is_verified = 1,
                         verification_date = ?,
@@ -189,50 +223,41 @@ class Database:
                         verification_attempts = verification_attempts + 1
                     WHERE user_id = ?
                 """, (current_time, method, user_id))
-                self.cursor.execute("""
+                cur.execute("""
                     INSERT INTO verification_history (
                         user_id, verification_type, success, attempt_date, ip_hash
                     )
                     VALUES (?, ?, 1, ?, ?)
                 """, (user_id, method, current_time, ip_hash))
-                self.conn.commit()
-            logger.info(f"Пользователь {user_id} верифицирован методом {method}")
+                conn.commit()
+            # Записываем в файл
+            set_verified(user_id)
             return True
         except Exception as e:
-            logger.error(f"verify_user ошибка: {e}")
-            self.conn.rollback()
+            logger.error(f"verify_user error: {e}")
+            conn.rollback()
             return False
 
     def is_verified(self, user_id):
-        try:
-            result = self._execute(
-                "SELECT is_verified FROM users WHERE user_id = ?",
-                (user_id,),
-                fetchone=True
-            )
-            verified = bool(result and result[0] == 1)
-            logger.info(f"is_verified({user_id}) -> {verified}")
-            return verified
-        except Exception as e:
-            logger.error(f"is_verified ошибка: {e}")
-            return False
+        # Используем файловое хранилище
+        return is_verified(user_id)
 
     def record_verification_attempt(self, user_id, success=False, method="captcha", ip_hash=None):
         try:
             current_time = datetime.now().isoformat()
             with self.lock:
-                self.cursor.execute("""
+                cur.execute("""
                     UPDATE users
                     SET verification_attempts = verification_attempts + 1
                     WHERE user_id = ?
                 """, (user_id,))
-                self.cursor.execute("""
+                cur.execute("""
                     INSERT INTO verification_history (
                         user_id, verification_type, success, attempt_date, ip_hash
                     )
                     VALUES (?, ?, ?, ?, ?)
                 """, (user_id, method, 1 if success else 0, current_time, ip_hash))
-                self.conn.commit()
+                conn.commit()
             return True
         except Exception:
             return False
@@ -252,25 +277,23 @@ class Database:
             current_time = datetime.now()
             unban_date = current_time + timedelta(days=days)
             with self.lock:
-                self.cursor.execute("""
+                cur.execute("""
                     INSERT INTO ban_list (user_id, admin_id, reason, ban_date, unban_date)
                     VALUES (?, ?, ?, ?, ?)
                 """, (user_id, admin_id, reason, current_time.isoformat(), unban_date.isoformat()))
-                self.cursor.execute("""
+                cur.execute("""
                     UPDATE users
                     SET is_banned = 1, ban_reason = ?, banned_date = ?
                     WHERE user_id = ?
                 """, (reason, current_time.isoformat(), user_id))
-                self.cursor.execute("""
+                cur.execute("""
                     UPDATE participants
                     SET is_valid = 0
                     WHERE user_id = ?
                 """, (user_id,))
-                self.conn.commit()
-            logger.info(f"Пользователь {user_id} забанен администратором {admin_id}")
+                conn.commit()
             return True
-        except Exception as e:
-            logger.error(f"ban_user ошибка: {e}")
+        except Exception:
             return False
 
     def unban_user(self, user_id):
@@ -280,7 +303,6 @@ class Database:
                 SET is_banned = 0, ban_reason = NULL, banned_date = NULL
                 WHERE user_id = ?
             """, (user_id,), commit=True)
-            logger.info(f"Пользователь {user_id} разбанен")
             return True
         except Exception:
             return False
@@ -320,21 +342,21 @@ class Database:
             ip_hash = hashlib.sha256(ip_seed.encode()).hexdigest()[:32]
             current_time = datetime.now().isoformat()
             with self.lock:
-                self.cursor.execute("UPDATE users SET ip_hash = ? WHERE user_id = ?", (ip_hash, user_id))
-                self.cursor.execute("SELECT user_count FROM ip_addresses WHERE ip_hash = ?", (ip_hash,))
-                exists = self.cursor.fetchone()
+                cur.execute("UPDATE users SET ip_hash = ? WHERE user_id = ?", (ip_hash, user_id))
+                cur.execute("SELECT user_count FROM ip_addresses WHERE ip_hash = ?", (ip_hash,))
+                exists = cur.fetchone()
                 if exists:
-                    self.cursor.execute("""
+                    cur.execute("""
                         UPDATE ip_addresses
                         SET user_count = user_count + 1, last_seen = ?
                         WHERE ip_hash = ?
                     """, (current_time, ip_hash))
                 else:
-                    self.cursor.execute("""
+                    cur.execute("""
                         INSERT INTO ip_addresses (ip_hash, user_count, first_seen, last_seen)
                         VALUES (?, 1, ?, ?)
                     """, (ip_hash, current_time, current_time))
-                self.conn.commit()
+                conn.commit()
             return ip_hash
         except Exception:
             return None
@@ -383,15 +405,15 @@ class Database:
             start_date = datetime.now()
             end_date = start_date + timedelta(hours=hours)
             with self.lock:
-                self.cursor.execute("""
+                cur.execute("""
                     INSERT INTO giveaways (
                         name, description, winner_count, start_date, end_date,
                         is_active, channel_id, auto_finish, require_subscription
                     )
                     VALUES (?, ?, ?, ?, ?, 1, ?, 1, ?)
                 """, (name, description, winners, start_date.isoformat(), end_date.isoformat(), channel_id, require_sub))
-                self.conn.commit()
-                return self.cursor.lastrowid
+                conn.commit()
+                return cur.lastrowid
         except Exception:
             return None
 
@@ -409,28 +431,26 @@ class Database:
         try:
             current_time = datetime.now().isoformat()
             with self.lock:
-                self.cursor.execute("""
+                cur.execute("""
                     INSERT INTO participants (giveaway_id, user_id, join_date, referred_by)
                     VALUES (?, ?, ?, ?)
                 """, (giveaway_id, user_id, current_time, referred_by))
                 if referred_by:
                     try:
-                        self.cursor.execute("""
+                        cur.execute("""
                             INSERT INTO referrals (referrer_id, referred_id, giveaway_id, referral_date)
                             VALUES (?, ?, ?, ?)
                         """, (referred_by, user_id, giveaway_id, current_time))
-                        self.cursor.execute("""
+                        cur.execute("""
                             UPDATE participants
                             SET bonus_entries = bonus_entries + 1
                             WHERE giveaway_id = ? AND user_id = ?
                         """, (giveaway_id, referred_by))
                     except Exception:
                         pass
-                self.conn.commit()
-            logger.info(f"Участник {user_id} добавлен в розыгрыш {giveaway_id}")
+                conn.commit()
             return True
-        except Exception as e:
-            logger.error(f"add_participant ошибка: {e}")
+        except Exception:
             return False
 
     def get_referral_count(self, user_id, giveaway_id):
@@ -576,11 +596,10 @@ class Database:
         except Exception:
             return None
 
-
 db = Database()
 captcha_storage = {}
 
-# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (без изменений) ==========
+# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 def generate_captcha():
     a = random.randint(1, 10)
     b = random.randint(1, 10)
@@ -637,7 +656,7 @@ def create_progress_bar(start_date, end_date, length=10):
     except Exception:
         return "[░░░░░░░░░░]"
 
-# ========== ОСНОВНЫЕ ОБРАБОТЧИКИ (полностью сохранены) ==========
+# ========== ОБРАБОТЧИКИ КОМАНД ==========
 def start(update, context):
     user = update.effective_user
     db.add_user(user.id, user.username or "", user.first_name or "", user.last_name or "")
