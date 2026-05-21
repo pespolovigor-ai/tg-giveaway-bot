@@ -66,7 +66,6 @@ class Database:
                     verification_attempts INTEGER DEFAULT 0
                 )
             """)
-
             self.cursor.execute("""
                 CREATE TABLE IF NOT EXISTS verification_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,7 +76,6 @@ class Database:
                     ip_hash TEXT
                 )
             """)
-
             self.cursor.execute("""
                 CREATE TABLE IF NOT EXISTS ban_list (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,7 +86,6 @@ class Database:
                     unban_date TEXT
                 )
             """)
-
             self.cursor.execute("""
                 CREATE TABLE IF NOT EXISTS ip_addresses (
                     ip_hash TEXT PRIMARY KEY,
@@ -97,7 +94,6 @@ class Database:
                     last_seen TEXT NOT NULL
                 )
             """)
-
             self.cursor.execute("""
                 CREATE TABLE IF NOT EXISTS giveaways (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -113,7 +109,6 @@ class Database:
                     require_subscription INTEGER DEFAULT 0
                 )
             """)
-
             self.cursor.execute("""
                 CREATE TABLE IF NOT EXISTS participants (
                     giveaway_id INTEGER NOT NULL,
@@ -125,7 +120,6 @@ class Database:
                     PRIMARY KEY (giveaway_id, user_id)
                 )
             """)
-
             self.cursor.execute("""
                 CREATE TABLE IF NOT EXISTS referrals (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -543,6 +537,18 @@ class Database:
             return [row[0] for row in rows]
         except Exception:
             return []
+
+    # ========== НОВЫЙ МЕТОД (исправляет ошибку /verify_info) ==========
+    def get_verification_info(self, user_id):
+        try:
+            result = self._execute(
+                "SELECT is_verified, verification_date, verification_method, verification_attempts FROM users WHERE user_id = ?",
+                (user_id,),
+                fetchone=True
+            )
+            return result
+        except Exception:
+            return None
 
 
 db = Database()
