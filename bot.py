@@ -17,7 +17,7 @@ from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageH
 # ========== КОНФИГУРАЦИЯ ==========
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_IDS = [5207853162, 5406117718]
-CHANNEL_ID = -1002376241083
+CHANNEL_ID = "@giveayboty"
 SOS_PASSWORD = os.getenv("SOS_PASSWORD", "").strip()
 
 if not BOT_TOKEN:
